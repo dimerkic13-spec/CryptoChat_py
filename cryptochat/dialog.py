@@ -61,7 +61,7 @@ class DialogPolicy:
             fits = [c for c in candidates if c.score >= t.clarify]
             if guided and len(fits) > max_options:
                 return DialogDecision(DecisionKind.CLARIFY_BRANCH, candidates)
-            options = fits[:max_options]
+            options = list(fits[:max_options])
         else:
             strong = [c for c in candidates if c.score >= t.answer]
             second = candidates[1].score if len(candidates) > 1 else 0.0
@@ -69,7 +69,7 @@ class DialogPolicy:
                 return DialogDecision(DecisionKind.ANSWER, (candidates[0],))
             if guided and len(strong) > max_options:
                 return DialogDecision(DecisionKind.CLARIFY_BRANCH, candidates)
-            options = strong[:max_options]
+            options = list(strong[:max_options])
 
         if result.scope is None:
             products: list[Category] = []
@@ -79,6 +79,17 @@ class DialogPolicy:
                     products.append(product)
             if len(products) >= 2:
                 return DialogDecision(DecisionKind.CLARIFY_PRODUCT, tuple(options), tuple(products))
+
+        fill = self._config.dialog.menu_fill_score
+        if guided and fill > 0:
+            # Меню из одного-двух вопросов часто не содержит нужного: добавляем следующие по оценке.
+            shown = {c.question.id for c in options}
+            for c in candidates:
+                if len(options) >= max_options:
+                    break
+                if c.score >= fill and c.question.id not in shown:
+                    options.append(c)
+                    shown.add(c.question.id)
 
         return DialogDecision(DecisionKind.CLARIFY, tuple(options))
 

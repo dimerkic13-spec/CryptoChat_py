@@ -264,6 +264,38 @@ def evaluate_synthetic(engine: ChatEngine, cases: dict[str, list[str]]) -> list[
     return results
 
 
+def simulate_dialog(engine: ChatEngine, query: str, expected: str, max_steps: int = 8) -> tuple[str, int]:
+    """Диалог с «идеальным» пользователем: в каждом меню он выбирает нужный вопрос, раздел, где он лежит,
+    или «Другая тема»; если ничего подходящего нет — 0 (поддержка).
+    Возвращает (итог, число выборов из меню): итог — answer (верный ответ), wrong (неверный ответ),
+    support (переведён в поддержку), lost (за max_steps шагов не дошёл)."""
+    bot = ChatEngine(engine.knowledge_base, engine.config, semantic=engine.semantic)
+    reply = bot.ask(query)
+    steps = 0
+    while True:
+        if reply.kind is ReplyKind.ANSWER:
+            return ("answer" if reply.question and reply.question.id == expected else "wrong"), steps
+        options = reply.options or ()
+        pick = next((o.number for o in options if o.question is not None and o.question.id == expected), None)
+        if pick is None:
+            pick = next((o.number for o in options if o.branch is not None
+                         and (expected + ".").startswith(o.branch.id + ".")), None)
+        if pick is None:
+            pick = next((o.number for o in options if o.browse and o.branch is None), None)
+        if pick is None:
+            return "support", steps
+        steps += 1
+        if steps > max_steps:
+            return "lost", steps
+        reply = bot.ask(str(pick))
+
+
+def evaluate_dialogs(engine: ChatEngine, cases: dict[str, list[str]]) -> list[tuple[str, str, str, int]]:
+    """(ожидаемый вопрос, запрос, итог, число выборов) для каждого запроса — см. simulate_dialog."""
+    return [(expected, query) + simulate_dialog(engine, query, expected)
+            for expected, queries in cases.items() for query in queries]
+
+
 def run_synthetic(engine: ChatEngine, content_dir: Path) -> int:
     """Проверка качества на content/synthetic.json (по 50 запросов на вопрос): по этой таблице подбираются ключи."""
     cases = load_synthetic(content_dir)
@@ -285,8 +317,20 @@ def run_synthetic(engine: ChatEngine, content_dir: Path) -> int:
     print(f"Морфология: {engine.morphology}; поиск по смыслу: {semantic}")
     print(f"Запросов: {len(results)} (вопросов: {len(cases)})")
     print("Всего: " + line(results))
+    dialogs = evaluate_dialogs(engine, cases)
+
+    def reached(rs, limit=3) -> int:
+        return sum(1 for r in rs if r[2] == "answer" and r[3] <= limit)
+
+    n = len(dialogs)
+    by_steps = [sum(1 for r in dialogs if r[2] == "answer" and r[3] == k) for k in range(4)]
+    print(f"Диалог (пользователь выбирает подходящий пункт меню): верный ответ не больше чем за 3 уточнения "
+          f"{reached(dialogs)} ({100.0 * reached(dialogs) / n:.1f}%), "
+          f"дошли до верного ответа {reached(dialogs, 99)} ({100.0 * reached(dialogs, 99) / n:.1f}%)")
+    print(f"  сразу {by_steps[0]}, за 1 уточнение {by_steps[1]}, за 2 — {by_steps[2]}, за 3 — {by_steps[3]}; "
+          f"поддержка {sum(1 for r in dialogs if r[2] == 'support')}, неверный ответ {sum(1 for r in dialogs if r[2] == 'wrong')}")
     print()
-    print("По вопросам (верно первым / промахов):")
+    print("По вопросам (верно первым / промахов / ответ за ≤3 уточнения):")
     titles = {q.id: q.title for q in engine.knowledge_base.questions}
     order = lambda qid: [int(p) if p.isdigit() else 0 for p in qid.split(".")]
     for qid in sorted({r[0] for r in results}, key=order):
@@ -294,7 +338,9 @@ def run_synthetic(engine: ChatEngine, content_dir: Path) -> int:
         first = sum(1 for r in rs if r[2] in (OUTCOME_ANSWER, OUTCOME_FIRST))
         miss = sum(1 for r in rs if r[2] == OUTCOME_MISS)
         title = titles.get(qid, "")
-        print(f"  {qid:<8} {first:3}/{len(rs):<3} промахов {miss:3}  {title[:55] + '…' if len(title) > 55 else title}")
+        dialog_ok = reached([d for d in dialogs if d[0] == qid])
+        print(f"  {qid:<8} {first:3}/{len(rs):<3} промахов {miss:3}  за ≤3: {dialog_ok:3}  "
+              f"{title[:55] + '…' if len(title) > 55 else title}")
 
     wrong = [r for r in results if r[2] == OUTCOME_WRONG]
     if wrong:

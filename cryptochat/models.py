@@ -74,6 +74,9 @@ class ChatOption:
     question: Optional[Question] = None
     product: Optional[Category] = None
     branch: Optional[Category] = None
+    # Пункт «посмотреть по списку»: показать вопросы раздела branch (или список тем, если branch нет)
+    # без нового поиска — так пользователь доходит до нужного вопроса, даже если меню не угадало.
+    browse: bool = False
 
 
 @dataclass(frozen=True)
@@ -233,6 +236,10 @@ class DialogConfig:
     # Если подходящих вопросов нет, вопросы с оценкой по ключам не ниже этой предлагаются
     # как «Возможно, вы имели в виду…» вместо меню тем (0 — не предлагать).
     suggest_score: float = 0.15
+    # Дозаполнять меню «Уточните…» до menu.maxOptions вопросами с оценкой не ниже этой (0 — не дозаполнять).
+    menu_fill_score: float = 0.0
+    # Добавлять в меню вопросов пункты «Другие вопросы раздела …» и «Другая тема — выбрать из списка тем».
+    browse_options: bool = False
     # Спрашивать после ответа, помог ли он.
     feedback: bool = True
 
@@ -317,6 +324,8 @@ class AppConfig:
             raise ContentError(f"{source}: dialog.maxBranchOptions должно быть не меньше 2.")
         if not 0 <= self.dialog.suggest_score <= 1:
             raise ContentError(f"{source}: dialog.suggestScore должно быть от 0 до 1.")
+        if not 0 <= self.dialog.menu_fill_score <= 1:
+            raise ContentError(f"{source}: dialog.menuFillScore должно быть от 0 до 1.")
         if not 0 <= self.dialog.min_score <= 1:
             raise ContentError(f"{source}: dialog.minScore должно быть от 0 до 1.")
         if self.text.morphology.lower() not in ("stemmer", "pymorphy3", "auto"):

@@ -168,9 +168,8 @@ class GuidedFlowTests(unittest.TestCase):
 
         menu = e.ask("Забыл пароль от рутокена")
         self.assertIs(ReplyKind.CLARIFY, menu.kind)
-        self.assertEqual("1.3.2.1", menu.options[0].question.id)
-        # С 0.2.6a «пароль от кабинета» сюда больше не попадает: у вопроса 1.3.3.2 больше ключей,
-        # и одно слово «пароль» не дотягивает до порога уточнения. Вопрос про токен — первый.
+        # С 0.2.7a меню дозаполняется (dialog.menuFillScore): «пароль от кабинета» снова вторым вариантом.
+        self.assertEqual(["1.3.2.1", "1.3.3.2"], [o.question.id for o in menu.options if o.question])
 
         answer = e.ask("1")
         self.assertIs(ReplyKind.ANSWER, answer.kind)
@@ -236,6 +235,61 @@ class SuggestionAndNavigationTests(unittest.TestCase):
         for _ in range(4):
             engine.ask("абракадабра")
         self.assertIs(ReplyKind.ESCALATE, engine.ask("абракадабра").kind)
+
+
+class MenuFillAndBrowseTests(unittest.TestCase):
+    """0.2.7a: меню вопросов дозаполняется до трёх вариантов, под ним — «Другие вопросы раздела»
+    и «Другая тема». Так нужный вопрос находится по списку, даже если меню его не угадало."""
+
+    def test_menu_is_filled_up_to_max_options(self):
+        engine = real_engine()
+        ids = [o.question.id for o in engine.ask("Забыл пароль от рутокена").options if o.question]
+        self.assertEqual(["1.3.2.1", "1.3.3.2"], ids)
+
+        engine = real_engine()
+        engine.config.dialog.menu_fill_score = 0
+        ids = [o.question.id for o in engine.ask("Забыл пароль от рутокена").options if o.question]
+        self.assertEqual(["1.3.2.1"], ids)
+
+    def test_browse_options_follow_questions(self):
+        reply = real_engine().ask("можно ли не активировать все лицензии")
+        self.assertIs(ReplyKind.CLARIFY, reply.kind)
+        labels = [o.label for o in reply.options]
+        self.assertIn("3. Другие вопросы раздела «Получение, активация, восстановление»", reply.text)
+        self.assertEqual("Другая тема — выбрать из списка тем", labels[-1])
+        self.assertTrue(all(o.browse for o in reply.options[2:]))
+
+    def test_section_option_lists_all_questions_of_the_section(self):
+        engine = real_engine()
+        engine.ask("можно ли не активировать все лицензии")
+        section = engine.ask("3")
+        self.assertIs(ReplyKind.CLARIFY_BRANCH, section.kind)
+        self.assertEqual(["1.1.4.1", "1.1.4.2", "1.1.4.3"], sorted(o.question.id for o in section.options))
+        answer = engine.ask(str(next(o.number for o in section.options if o.question.id == "1.1.4.3")))
+        self.assertIs(ReplyKind.ANSWER, answer.kind)
+        self.assertEqual("1.1.4.3", answer.question.id)
+
+    def test_other_topic_goes_down_the_tree_without_new_search(self):
+        engine = real_engine()
+        engine.ask("можно ли не активировать все лицензии")
+        topics = engine.ask("4")
+        self.assertIs(ReplyKind.CLARIFY_BRANCH, topics.kind)
+        self.assertEqual(["1.1", "1.2", "1.3"], sorted(o.branch.id for o in topics.options))
+        topic = next(o.number for o in topics.options if o.branch.id == "1.1")
+        blocks = engine.ask(str(topic))
+        self.assertIs(ReplyKind.CLARIFY_BRANCH, blocks.kind)
+        self.assertTrue(all(o.branch is not None for o in blocks.options))
+        block = next(o.number for o in blocks.options if o.branch.id == "1.1.1")
+        questions = engine.ask(str(block))
+        self.assertEqual(7, len(questions.options))
+        answer = engine.ask(str(next(o.number for o in questions.options if o.question.id == "1.1.1.4")))
+        self.assertEqual("1.1.1.4", answer.question.id)
+
+    def test_browse_options_are_off_by_default(self):
+        reply = engine().ask("купить лицензию")
+        self.assertFalse(any(o.browse for o in reply.options))
+        self.assertFalse(AppConfig().dialog.browse_options)
+        self.assertEqual(0, AppConfig().dialog.menu_fill_score)
 
 
 class AcceptanceTests(unittest.TestCase):

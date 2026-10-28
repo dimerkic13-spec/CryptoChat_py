@@ -29,7 +29,9 @@
     "maxBranchOptions": 7,
     "minScore": 0.05,
     "feedback": true,
-    "suggestScore": 0.15
+    "suggestScore": 0.05,
+    "menuFillScore": 0.05,
+    "browseOptions": true
   },
   "text": {
     "morphology": "auto"
