@@ -168,7 +168,9 @@ class GuidedFlowTests(unittest.TestCase):
 
         menu = e.ask("Забыл пароль от рутокена")
         self.assertIs(ReplyKind.CLARIFY, menu.kind)
-        self.assertEqual(["1.3.2.1", "1.3.3.2"], [o.question.id for o in menu.options])
+        self.assertEqual("1.3.2.1", menu.options[0].question.id)
+        # С 0.2.6a «пароль от кабинета» сюда больше не попадает: у вопроса 1.3.3.2 больше ключей,
+        # и одно слово «пароль» не дотягивает до порога уточнения. Вопрос про токен — первый.
 
         answer = e.ask("1")
         self.assertIs(ReplyKind.ANSWER, answer.kind)

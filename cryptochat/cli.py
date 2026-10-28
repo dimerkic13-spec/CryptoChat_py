@@ -27,6 +27,7 @@ class Options:
     validate: bool = False
     selftest: bool = False
     compare: bool = False
+    synthetic: bool = False
     compare_semantic: bool = False
     download_model: bool = False
     semantic_dump: bool = False
@@ -57,6 +58,8 @@ class Options:
                 options.selftest = True
             elif arg == "--compare":
                 options.compare = True
+            elif arg == "--synthetic":
+                options.synthetic = True
             elif arg == "--compare-semantic":
                 options.compare_semantic = True
             elif arg == "--download-model":
@@ -225,6 +228,79 @@ def run_selftest(engine: ChatEngine, content_dir: Path) -> int:
         print(f"Самопроверка НЕ пройдена: {len(failures)} из {checked}.")
         return 1
     print(f"Самопроверка пройдена ({checked} проверок).")
+    return 0
+
+
+# ---------- Синтетические запросы ----------
+
+SYNTHETIC_FILE = "synthetic.json"
+
+# Чем закончился запрос: сразу верный ответ / нужный вопрос первым в меню / в меню, но не первым /
+# нужного вопроса нет в меню / сразу ответил, но не на тот вопрос (самое опасное).
+OUTCOME_ANSWER, OUTCOME_FIRST, OUTCOME_IN_MENU, OUTCOME_MISS, OUTCOME_WRONG = "answer", "first", "in_menu", "miss", "wrong"
+
+
+def load_synthetic(content_dir: Path) -> dict[str, list[str]]:
+    path = content_dir / SYNTHETIC_FILE
+    return json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else {}
+
+
+def classify_synthetic(reply: ChatReply, expected: str) -> str:
+    if reply.kind is ReplyKind.ANSWER:
+        return OUTCOME_ANSWER if reply.question and reply.question.id == expected else OUTCOME_WRONG
+    ids = [o.question.id for o in reply.options if o.question is not None]
+    if ids and ids[0] == expected:
+        return OUTCOME_FIRST
+    return OUTCOME_IN_MENU if expected in ids else OUTCOME_MISS
+
+
+def evaluate_synthetic(engine: ChatEngine, cases: dict[str, list[str]]) -> list[tuple[str, str, str, Optional[str]]]:
+    """Каждый запрос задаётся новому боту. Возвращает (ожидаемый вопрос, запрос, итог, что получено)."""
+    results = []
+    for expected, queries in cases.items():
+        for query in queries:
+            reply = ChatEngine(engine.knowledge_base, engine.config, semantic=engine.semantic).ask(query)
+            results.append((expected, query, classify_synthetic(reply, expected), _first_question_id(reply)))
+    return results
+
+
+def run_synthetic(engine: ChatEngine, content_dir: Path) -> int:
+    """Проверка качества на content/synthetic.json (по 50 запросов на вопрос): по этой таблице подбираются ключи."""
+    cases = load_synthetic(content_dir)
+    if not cases:
+        print(f"Файл {SYNTHETIC_FILE} не найден в {content_dir}.")
+        return 1
+    results = evaluate_synthetic(engine, cases)
+
+    def line(rs) -> str:
+        count = {o: sum(1 for r in rs if r[2] == o) for o in
+                 (OUTCOME_ANSWER, OUTCOME_FIRST, OUTCOME_IN_MENU, OUTCOME_MISS, OUTCOME_WRONG)}
+        first = count[OUTCOME_ANSWER] + count[OUTCOME_FIRST]
+        share = lambda n: f"{100.0 * n / len(rs):.1f}%" if rs else "0%"
+        return (f"верно первым {first:4} ({share(first)}) | сразу ответ {count[OUTCOME_ANSWER]:4} | "
+                f"в меню не первым {count[OUTCOME_IN_MENU]:4} | промах {count[OUTCOME_MISS]:4} "
+                f"({share(count[OUTCOME_MISS])}) | НЕВЕРНЫЙ ОТВЕТ {count[OUTCOME_WRONG]:3}")
+
+    semantic = getattr(engine.semantic.encoder, "name", "вкл") if engine.semantic else "выкл"
+    print(f"Морфология: {engine.morphology}; поиск по смыслу: {semantic}")
+    print(f"Запросов: {len(results)} (вопросов: {len(cases)})")
+    print("Всего: " + line(results))
+    print()
+    print("По вопросам (верно первым / промахов):")
+    titles = {q.id: q.title for q in engine.knowledge_base.questions}
+    order = lambda qid: [int(p) if p.isdigit() else 0 for p in qid.split(".")]
+    for qid in sorted({r[0] for r in results}, key=order):
+        rs = [r for r in results if r[0] == qid]
+        first = sum(1 for r in rs if r[2] in (OUTCOME_ANSWER, OUTCOME_FIRST))
+        miss = sum(1 for r in rs if r[2] == OUTCOME_MISS)
+        title = titles.get(qid, "")
+        print(f"  {qid:<8} {first:3}/{len(rs):<3} промахов {miss:3}  {title[:55] + '…' if len(title) > 55 else title}")
+
+    wrong = [r for r in results if r[2] == OUTCOME_WRONG]
+    if wrong:
+        print("\nНеверные прямые ответы:")
+        for expected, query, _, got in wrong:
+            print(f"  ожидался {expected}, ответ {got}: «{query}»")
     return 0
 
 
@@ -641,6 +717,7 @@ def print_usage() -> None:
     print("  --validate         проверить данные и выйти")
     print("  --selftest         прогнать приёмочные вопросы и выйти")
     print("  --compare          сравнить стеммер и pymorphy3 на приёмочных вопросах")
+    print("  --synthetic        прогнать content/synthetic.json (по 50 запросов на вопрос) и показать таблицу")
     print("  --morphology <m>   stemmer, pymorphy3 или auto (вместо text.morphology из config.json)")
     print("  --compare-semantic сравнить поиск с моделью и без неё (контрольные запросы и перефразы)")
     print("  --download-model   скачать модель для поиска по смыслу в папку models")
@@ -701,6 +778,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         engine.debug_enabled = options.debug
         if options.selftest:
             return run_selftest(engine, content_dir)
+        if options.synthetic:
+            return run_synthetic(engine, content_dir)
         return chat(engine)
     except ContentError as ex:
         print("Ошибка: " + str(ex), file=sys.stderr)
