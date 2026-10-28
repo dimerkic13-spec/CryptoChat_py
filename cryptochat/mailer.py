@@ -98,7 +98,8 @@ def send_session(config: EmailConfig, password: str, path: Path,
 
 
 def send_pending(config: EmailConfig, app_dir: Path, folder: Path, skip: Optional[str] = None,
-                 log: Callable[[str], None] = print, smtp_factory: Optional[Callable] = None) -> int:
+                 log: Callable[[str], None] = print, smtp_factory: Optional[Callable] = None,
+                 on_sent: Optional[Callable[[str], None]] = None) -> int:
     """Отправляет все готовые неотправленные журналы. Возвращает число отправленных писем."""
     paths = pending_sessions(folder, skip=skip)
     if not paths:
@@ -109,6 +110,8 @@ def send_pending(config: EmailConfig, app_dir: Path, folder: Path, skip: Optiona
         if send_session(config, password, path, smtp_factory):
             sent += 1
             log(f"Журнал {path.stem} отправлен на {', '.join(config.recipients())}.")
+            if on_sent is not None:
+                on_sent(path.stem)
     return sent
 
 

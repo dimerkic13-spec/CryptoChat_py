@@ -79,6 +79,10 @@ class SessionRecorder:
             self._ok = False  # журнал не должен ломать диалог
 
 
+def hostname() -> str:
+    return _hostname()
+
+
 def _hostname() -> str:
     try:
         return socket.gethostname()

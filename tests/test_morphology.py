@@ -143,14 +143,14 @@ class RealPymorphyTests(unittest.TestCase):
         self.assertEqual("купить", lem("купили"))
 
     def test_real_content_loads_with_pymorphy(self):
-        engine = ChatEngine.create(CONTENT_DIR, "pymorphy3")
+        engine = ChatEngine.create(CONTENT_DIR, "pymorphy3", semantic=False)
         self.assertEqual("pymorphy3", engine.morphology)
         self.assertEqual(38, len(engine.knowledge_base.questions))
 
     def test_acceptance_with_pymorphy(self):
         """Если этот тест падает, запустите  python run.py --compare  и пришлите вывод:
         по нему подбираются ключевые слова под морфологию."""
-        failures, _, _ = check_acceptance(ChatEngine.create(CONTENT_DIR, "pymorphy3"), CONTENT_DIR)
+        failures, _, _ = check_acceptance(ChatEngine.create(CONTENT_DIR, "pymorphy3", semantic=False), CONTENT_DIR)
         self.assertEqual([], failures, "\n".join(failures))
 
 

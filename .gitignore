@@ -12,3 +12,7 @@ logs/
 
 # Пароль почты — никогда не в Git
 secrets.json
+
+# Скачанные модели для поиска по смыслу
+models/
+semantic_dump.json

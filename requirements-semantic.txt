@@ -1,0 +1,6 @@
+# Поиск по смыслу: sentence-transformers и PyTorch. Большая установка (сотни мегабайт).
+# На Windows с PyPI ставится версия PyTorch для процессора — видеокарта не нужна.
+# Ставить лучше в отдельное окружение (.venv). Если для вашей версии Python PyTorch ещё
+# не выпущен, используйте Python 3.13.
+-r requirements.txt
+sentence-transformers>=3.0

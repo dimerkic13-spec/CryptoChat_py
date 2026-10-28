@@ -13,7 +13,9 @@ from .dialog import ChatSession, DecisionKind, DialogPolicy, PendingChoice, Poli
 from .knowledge import KnowledgeBase
 from .models import (AppConfig, Category, ChatOption, ChatReply, ContentError, FeedbackEntry, Question,
                      ReplyKind)
-from .retrieval import KeywordRetriever, RetrievalResult, Retriever, evaluate, id_key
+from .fuzzy import FuzzyMatcher, make_fuzzy
+from .retrieval import KeywordRetriever, RetrievalResult, Retriever, evaluate, id_key, typo_matches
+from .semantic import SemanticIndex, make_semantic
 from .text import (DefaultTextProcessor, MorphologyUnavailable, TextProcessor, lemmatizer_name,
                    make_lemmatizer)
 
@@ -51,11 +53,17 @@ class ChatEngine:
                  text: Optional[TextProcessor] = None,
                  retriever: Optional[Retriever] = None,
                  policy: Optional[Policy] = None,
-                 composer: Optional[AnswerComposer] = None):
+                 composer: Optional[AnswerComposer] = None,
+                 semantic: Optional[SemanticIndex] = None):
         self.knowledge_base = kb
         self.config = config
         self._text = text or DefaultTextProcessor(synonyms=kb.synonyms, lemmatize=kb.lemmatize)
-        self._retriever = retriever or KeywordRetriever(kb, config)
+        # Один и тот же учёт опечаток для поиска вопросов и для меню уточнения по веткам.
+        self.fuzzy: Optional[FuzzyMatcher] = getattr(retriever, "fuzzy", None) if retriever else make_fuzzy(config.fuzzy)
+        self._retriever = retriever or KeywordRetriever(kb, config, self.fuzzy, semantic)
+        # Поиск по смыслу (None — выключен или недоступен; причина — в semantic_note).
+        self.semantic: Optional[SemanticIndex] = getattr(self._retriever, "semantic", None)
+        self.semantic_note: Optional[str] = None
         self._policy = policy or DialogPolicy(config, kb)
         self._composer = composer or TemplateComposer()
         self._session = ChatSession()
@@ -69,14 +77,26 @@ class ChatEngine:
         self.session_id: Optional[str] = None
 
     @staticmethod
-    def create(content_directory: str | Path, morphology: Optional[str] = None) -> "ChatEngine":
+    def create(content_directory: str | Path, morphology: Optional[str] = None,
+               semantic: Optional[bool] = None, app_dir: Optional[Path] = None,
+               semantic_index: Optional[SemanticIndex] = None) -> "ChatEngine":
         """Загружает и проверяет каталог content/ и создаёт готовый движок.
-        morphology переопределяет text.morphology из config.json (нужно для сравнения режимов)."""
+
+        morphology переопределяет text.morphology из config.json (нужно для сравнения режимов);
+        semantic=False выключает поиск по смыслу (тесты, сравнение), True — включает;
+        app_dir — папка программы (от неё считается папка с моделью);
+        semantic_index — готовый индекс (чтобы не загружать модель повторно)."""
         config = AppConfig.load(content_directory)
+        if semantic is not None:
+            config.semantic.enabled = semantic
         lemmatize, note = create_lemmatizer(morphology or config.text.morphology)
         kb = knowledge.load(content_directory, lemmatize)
-        engine = ChatEngine(kb, config)
+        semantic_note = None
+        if semantic_index is None and config.semantic.enabled:
+            semantic_index, semantic_note = make_semantic(config.semantic, kb.questions, app_dir)
+        engine = ChatEngine(kb, config, semantic=semantic_index if config.semantic.enabled else None)
         engine.morphology_note = note
+        engine.semantic_note = semantic_note
         return engine
 
     @property
@@ -118,7 +138,7 @@ class ChatEngine:
         # Любой другой ввод в режиме ожидания выбора считается новым вопросом.
         self._session.reset()
         lemmas = self._text.lemmatize(text)
-        return self._respond(self._retriever.search(lemmas), None, text)
+        return self._respond(self._retriever.search(lemmas, query=text), None, text)
 
     # ---------- Отзыв об ответе ----------
 
@@ -144,9 +164,11 @@ class ChatEngine:
 
     def _choose(self, pending: PendingChoice, option: ChatOption) -> ChatReply:
         if option.product is not None:
-            return self._respond(self._retriever.search(pending.lemmas, option.product), option.product, pending.query)
+            return self._respond(self._retriever.search(pending.lemmas, option.product, query=pending.query),
+                                 option.product, pending.query)
         if option.branch is not None:
-            return self._respond(self._retriever.search(pending.lemmas, option.branch), option.branch, pending.query)
+            return self._respond(self._retriever.search(pending.lemmas, option.branch, query=pending.query),
+                                 option.branch, pending.query)
 
         reply = self._answer_reply(option.question, option.score, None)
         if not self._guided:
@@ -193,6 +215,9 @@ class ChatEngine:
             self._session.next_step()
 
         if kind is DecisionKind.CLARIFY_BRANCH:
+            fallback = self._semantic_menu(node or result.scope, result, query, debug)
+            if fallback is not None:
+                return fallback
             return self._branch_reply(node or result.scope, result, query, debug)
 
         options = tuple(ChatOption(i + 1, c.question.title, c.score, question=c.question)
@@ -208,6 +233,32 @@ class ChatEngine:
             lines += [f"  {o.number}. {o.label}  (score: {fmt(o.score)})" for o in options]
             lines.append("  0. Другое / связаться с поддержкой")
         lines.append("Введите номер:")
+        return ChatReply(ReplyKind.CLARIFY, "\n".join(lines), options, debug)
+
+    # ---------- Запасное меню по смыслу ----------
+
+    def _semantic_menu(self, node: Optional[Category], result: RetrievalResult,
+                       query: Optional[str], debug: Optional[str]) -> Optional[ChatReply]:
+        """Ключи ничего не нашли: показать самые похожие по смыслу вопросы вместо меню тем.
+        Возвращает None, если поиск по смыслу выключен или ни один вопрос не выделяется."""
+        cfg = self.config.semantic
+        if self.semantic is None or not cfg.menu_fallback or not result.cosines or not result.lemmas:
+            return None
+        kb = self.knowledge_base
+        pool = {q.id: q for q in (kb.questions if node is None else kb.questions_under(node.id)) if q.is_active}
+        cosines = {qid: c for qid, c in result.cosines.items() if qid in pool}
+        if not cosines:
+            return None
+        z = SemanticIndex.z_scores(cosines)
+        top = [qid for qid in sorted(cosines, key=cosines.get, reverse=True)[:cfg.menu_size] if z[qid] >= cfg.menu_z]
+        if not top:
+            return None
+        options = tuple(ChatOption(i + 1, pool[qid].title, cosines[qid], question=pool[qid])
+                        for i, qid in enumerate(top))
+        self._session.wait(PendingChoice(ReplyKind.CLARIFY, options, result.lemmas, None, query))
+        lines = ["Точного совпадения не нашёл. Возможно, вы имели в виду:"]
+        lines += [f"  {o.number}. {o.label}" for o in options]
+        lines += ["  0. Ничего не подходит — обратиться в техподдержку", "Введите номер:"]
         return ChatReply(ReplyKind.CLARIFY, "\n".join(lines), options, debug)
 
     # ---------- Уточнение по веткам дерева ----------
@@ -228,7 +279,9 @@ class ChatEngine:
 
         if not children:
             pool = kb.questions if node is None else kb.questions_under(node.id)
-            ranked = sorted(((q, evaluate(q.keywords, lemmas, prefix)[0]) for q in pool if q.is_active),
+            sem = result.semantic
+            ranked = sorted(((q, max(evaluate(q.keywords, lemmas, prefix, self.fuzzy)[0], sem.get(q.id, 0.0)))
+                             for q in pool if q.is_active),
                             key=lambda x: (-x[1], id_key(x[0].id)))[:max_options]
             options = tuple(ChatOption(i + 1, q.title, s, question=q) for i, (q, s) in enumerate(ranked))
             self._session.wait(PendingChoice(ReplyKind.CLARIFY_BRANCH, options, lemmas, None, query))
@@ -238,7 +291,7 @@ class ChatEngine:
             lines += ["  0. Ничего не подходит — обратиться в техподдержку", "Введите номер:"]
             return ChatReply(ReplyKind.CLARIFY_BRANCH, "\n".join(lines), options, debug)
 
-        ranked_branches = sorted(((c, self._branch_score(c, lemmas)) for c in children),
+        ranked_branches = sorted(((c, self._branch_score(c, lemmas, result.semantic)) for c in children),
                                  key=lambda x: (-x[1], id_key(x[0].id)))[:max_options]
         options = tuple(ChatOption(i + 1, c.name, s, branch=c) for i, (c, s) in enumerate(ranked_branches))
         self._session.wait(PendingChoice(ReplyKind.CLARIFY_BRANCH, options, lemmas, None, query))
@@ -253,12 +306,13 @@ class ChatEngine:
         children = kb.roots if node is None else node.children
         return [c for c in children if any(q.is_active for q in kb.questions_under(c.id))]
 
-    def _branch_score(self, category: Category, lemmas: Sequence[str]) -> float:
-        """Оценка ветки: лучшее из ключей самой ветки и ключей её вопросов."""
+    def _branch_score(self, category: Category, lemmas: Sequence[str], semantic: Optional[dict] = None) -> float:
+        """Оценка ветки: лучшее из ключей самой ветки, ключей её вопросов и смысловой оценки вопросов."""
         prefix = self.config.scoring.prefix_min_length
-        best = max((evaluate(q.keywords, lemmas, prefix)[0]
+        semantic = semantic or {}
+        best = max((max(evaluate(q.keywords, lemmas, prefix, self.fuzzy)[0], semantic.get(q.id, 0.0))
                     for q in self.knowledge_base.questions_under(category.id) if q.is_active), default=0.0)
-        own = evaluate(category.keywords, lemmas, prefix)[0] if category.keywords else 0.0
+        own = evaluate(category.keywords, lemmas, prefix, self.fuzzy)[0] if category.keywords else 0.0
         return max(best, own)
 
     # ---------- Ответ с похожими вопросами и отзывом ----------
@@ -370,8 +424,17 @@ class ChatEngine:
         lines = [f"--- леммы: [{', '.join(result.lemmas)}]"]
         lines.append("--- область: не определена" if result.scope is None
                      else f"--- область: {result.scope.id} {result.scope.name} (score {fmt(result.scope_score)})")
-        lines += [f"  {c.question.id} \"{c.question.title}\" → {fmt(c.score)}" for c in result.candidates]
-        lines.append(f"--- шагов уточнения без ответа: {self._session.steps}; морфология: {self.morphology}")
+        prefix = self.config.scoring.prefix_min_length
+        for c in result.candidates:
+            typos = typo_matches(c.question.keywords, result.lemmas, prefix, self.fuzzy)
+            note = ("  (опечатка: " + ", ".join(f"{a}≈{b}" for a, b in typos) + ")") if typos else ""
+            if c.cosine is not None:
+                note += f"  [ключи {fmt(c.keyword_score)}, смысл: похожесть {fmt(c.cosine)}]"
+            lines.append(f"  {c.question.id} \"{c.question.title}\" → {fmt(c.score)}{note}")
+        fuzzy = self.fuzzy.name if self.fuzzy else "выкл"
+        semantic = self.semantic.name if self.semantic else "выкл"
+        lines.append(f"--- шагов уточнения без ответа: {self._session.steps}; морфология: {self.morphology}; "
+                     f"опечатки: {fuzzy}; смысл: {semantic}")
         return "\n".join(lines)
 
 

@@ -33,9 +33,39 @@
   "text": {
     "morphology": "auto"
   },
+  "fuzzy": {
+    "enabled": true,
+    "threshold": 85,
+    "minLength": 5,
+    "weight": 0.8
+  },
+  "semantic": {
+    "enabled": true,
+    "model": "cointegrated/rubert-tiny2",
+    "cacheDir": "models",
+    "device": "cpu",
+    "localFilesOnly": false,
+    "mode": "relative",
+    "zLow": 0.0,
+    "zHigh": 5.0,
+    "topK": 3,
+    "low": 0.55,
+    "high": 0.9,
+    "weight": 0.3,
+    "combine": "or",
+    "queryPrefix": "",
+    "passagePrefix": "",
+    "menuFallback": true,
+    "menuZ": 1.5,
+    "menuSize": 3
+  },
   "sessions": {
     "enabled": true,
     "path": "logs/sessions"
+  },
+  "database": {
+    "enabled": true,
+    "path": "logs/cryptochat.db"
   },
   "email": {
     "enabled": false,

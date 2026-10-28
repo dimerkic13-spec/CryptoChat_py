@@ -48,6 +48,7 @@ class RawQuestion:
     source: Optional[RawSource] = field(default_factory=RawSource)
     status: str = "active"
     keywords: list[RawKeyword] = field(default_factory=list)
+    examples: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -118,7 +119,16 @@ def _question(data: Any) -> RawQuestion:
         source=source,
         status=_str(_get(data, "status", "active")),
         keywords=_keywords(_get(data, "keywords")),
+        examples=_examples(_get(data, "examples")),
     )
+
+
+def _examples(items: Any) -> list[str]:
+    if items is None:
+        return []
+    if not isinstance(items, list) or not all(isinstance(x, str) for x in items):
+        raise ContentError(f"Поле examples должно быть списком строк [\"...\"]: {items!r}")
+    return [x for x in items if x.strip()]
 
 
 def _read_json(path: Path, required: bool) -> Any:
@@ -399,6 +409,7 @@ class KnowledgeBase:
                 revision=q.source.revision if q.source else None,
                 is_active=q.status.lower() != "draft",
                 keywords=to_keywords(q.keywords),
+                examples=list(q.examples),
             )
             for q in content.questions
         ]

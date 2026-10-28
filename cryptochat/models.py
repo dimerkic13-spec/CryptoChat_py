@@ -47,6 +47,8 @@ class Question:
     revision: Optional[str]
     is_active: bool
     keywords: list[Keyword]
+    # Другие формулировки того же вопроса — для поиска по смыслу (необязательно).
+    examples: list[str] = field(default_factory=list)
 
 
 # ---------- Ответ бота ----------
@@ -123,6 +125,13 @@ class SessionsConfig:
 
 
 @dataclass
+class DatabaseConfig:
+    # База бесед SQLite: сессии, сообщения, отзывы, неотвеченные запросы (для --stats).
+    enabled: bool = True
+    path: str = "logs/cryptochat.db"
+
+
+@dataclass
 class EmailConfig:
     # Отправлять журнал беседы на почту после закрытия программы.
     enabled: bool = False
@@ -157,6 +166,40 @@ class TextConfig:
     # Как приводить слово к основе: "stemmer" (простой стеммер), "pymorphy3" (морфологический словарь)
     # или "auto" (pymorphy3, если установлен, иначе стеммер).
     morphology: str = "stemmer"
+
+
+@dataclass
+class FuzzyConfig:
+    # Учёт опечаток (RapidFuzz, без него — встроенный difflib).
+    enabled: bool = False
+    threshold: float = 85      # минимальная похожесть слов, 0–100
+    min_length: int = 5        # слова короче не сравниваются нечётко
+    weight: float = 0.8        # какую долю веса даёт ключ, совпавший с опечаткой
+
+
+@dataclass
+class SemanticConfig:
+    # Поиск по смыслу: sentence-transformers на PyTorch (необязательно).
+    enabled: bool = False
+    model: str = "cointegrated/rubert-tiny2"   # небольшая русская модель (~120 МБ)
+    cache_dir: str = "models"                  # куда скачивается модель (рядом с программой)
+    device: str = "cpu"                        # "cpu" или "cuda" (видеокарта NVIDIA)
+    local_files_only: bool = False             # true — не ходить в интернет, брать модель только из cache_dir
+    mode: str = "relative"                     # "relative" (на фоне остальных вопросов) или "absolute"
+    z_low: float = 0.0                         # relative: z-оценка ниже — смысловая оценка 0
+    z_high: float = 5.0                        # relative: z-оценка выше — смысловая оценка = weight
+    top_k: int = 3                             # relative: сколько самых похожих вопросов учитывать
+    low: float = 0.55                          # absolute: похожесть ниже — смысловая оценка 0
+    high: float = 0.9                          # absolute: похожесть выше — смысловая оценка = weight
+    weight: float = 0.3                        # максимальная оценка от смысла
+    combine: str = "or"                        # "or" (смысл усиливает ключи) или "max"
+    # Запасное меню: если ключи не нашли ничего, показать самые похожие по смыслу вопросы
+    # вместо меню тем. Вопрос попадает в меню, если его z-оценка не ниже menu_z.
+    menu_fallback: bool = True
+    menu_z: float = 1.5
+    menu_size: int = 3
+    query_prefix: str = ""                     # для моделей e5/USER: "query: "
+    passage_prefix: str = ""                   # для моделей e5/USER: "passage: "
 
 
 @dataclass
@@ -239,7 +282,10 @@ class AppConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     dialog: DialogConfig = field(default_factory=DialogConfig)
     text: TextConfig = field(default_factory=TextConfig)
+    fuzzy: FuzzyConfig = field(default_factory=FuzzyConfig)
+    semantic: SemanticConfig = field(default_factory=SemanticConfig)
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
     email: EmailConfig = field(default_factory=EmailConfig)
 
     @staticmethod
@@ -270,6 +316,29 @@ class AppConfig:
             raise ContentError(f"{source}: dialog.minScore должно быть от 0 до 1.")
         if self.text.morphology.lower() not in ("stemmer", "pymorphy3", "auto"):
             raise ContentError(f"{source}: text.morphology должно быть stemmer, pymorphy3 или auto.")
+        s = self.semantic
+        if not -1 <= s.low < s.high <= 1:
+            raise ContentError(f"{source}: semantic.low и semantic.high — от -1 до 1, low меньше high.")
+        if not 0 < s.weight <= 1:
+            raise ContentError(f"{source}: semantic.weight должно быть больше 0 и не больше 1.")
+        if s.mode not in ("relative", "absolute"):
+            raise ContentError(f"{source}: semantic.mode должно быть relative или absolute.")
+        if s.combine not in ("max", "or"):
+            raise ContentError(f"{source}: semantic.combine должно быть max или or.")
+        if not s.z_low < s.z_high:
+            raise ContentError(f"{source}: semantic.zLow должно быть меньше semantic.zHigh.")
+        if s.menu_size < 1:
+            raise ContentError(f"{source}: semantic.menuSize должно быть не меньше 1.")
+        if s.top_k < 1:
+            raise ContentError(f"{source}: semantic.topK должно быть не меньше 1.")
+        if s.enabled and not s.model.strip():
+            raise ContentError(f"{source}: semantic.model не задан.")
+        if not 50 <= self.fuzzy.threshold <= 100:
+            raise ContentError(f"{source}: fuzzy.threshold должно быть от 50 до 100.")
+        if not 0 < self.fuzzy.weight <= 1:
+            raise ContentError(f"{source}: fuzzy.weight должно быть больше 0 и не больше 1.")
+        if self.fuzzy.min_length < 3:
+            raise ContentError(f"{source}: fuzzy.minLength должно быть не меньше 3.")
         if self.email.security.lower() not in ("ssl", "starttls", "none"):
             raise ContentError(f"{source}: email.security должно быть ssl, starttls или none.")
         if self.email.enabled:

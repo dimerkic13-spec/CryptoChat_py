@@ -1,9 +1,11 @@
 """Поиск: оценка вопросов по ключевым словам, область поиска, топ кандидатов."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Optional, Protocol, Sequence
 
+from .fuzzy import FuzzyMatcher, make_fuzzy
+from .semantic import SemanticIndex
 from .knowledge import KnowledgeBase
 from .models import AppConfig, Category, Keyword, Question
 
@@ -19,8 +21,10 @@ def match(lemma: str, keyword: str, prefix_min_length: int) -> bool:
     )
 
 
-def evaluate(keywords: Sequence[Keyword], lemmas: Sequence[str], prefix_min_length: int) -> tuple[float, int]:
+def evaluate(keywords: Sequence[Keyword], lemmas: Sequence[str], prefix_min_length: int,
+             fuzzy: Optional[FuzzyMatcher] = None) -> tuple[float, int]:
     """score = вес совпавших ключей / вес всех ключей. Каждый ключ считается один раз.
+    Ключ, совпавший только с опечаткой (fuzzy), даёт fuzzy.weight от своего веса.
     Возвращает (score, число совпавших ключей)."""
     total = 0.0
     matched_weight = 0.0
@@ -30,9 +34,35 @@ def evaluate(keywords: Sequence[Keyword], lemmas: Sequence[str], prefix_min_leng
         if any(match(l, keyword.word, prefix_min_length) for l in lemmas):
             matched_weight += keyword.weight
             matched += 1
+        elif fuzzy is not None and any(fuzzy.matches(l, keyword.word) for l in lemmas):
+            matched_weight += keyword.weight * fuzzy.weight
+            matched += 1
     if total <= 0:
         return 0.0, 0
     return matched_weight / total, matched
+
+
+def combine_scores(keyword: float, semantic: float, mode: str = "max") -> float:
+    """Совмещение оценок: "max" — лучшая из двух; "or" — обе усиливают друг друга (не больше 1)."""
+    if mode == "or":
+        return keyword + semantic - keyword * semantic
+    return max(keyword, semantic)
+
+
+def typo_matches(keywords: Sequence[Keyword], lemmas: Sequence[str], prefix_min_length: int,
+                 fuzzy: Optional[FuzzyMatcher]) -> list[tuple[str, str]]:
+    """Пары (слово запроса, ключ), совпавшие только с учётом опечатки. Для отладки."""
+    if fuzzy is None:
+        return []
+    pairs = []
+    for keyword in keywords:
+        if any(match(l, keyword.word, prefix_min_length) for l in lemmas):
+            continue
+        for l in lemmas:
+            if fuzzy.matches(l, keyword.word):
+                pairs.append((l, keyword.word))
+                break
+    return pairs
 
 
 def id_key(identifier: str) -> tuple:
@@ -49,6 +79,8 @@ def id_key(identifier: str) -> tuple:
 class Candidate:
     question: Question
     score: float
+    keyword_score: float = 0.0   # оценка только по ключам (для отладки)
+    cosine: Optional[float] = None  # похожесть по смыслу, если поиск по смыслу включён
 
 
 @dataclass(frozen=True)
@@ -58,10 +90,13 @@ class RetrievalResult:
     scope: Optional[Category]
     scope_score: float
     candidates: tuple[Candidate, ...]
+    semantic: dict = field(default_factory=dict)  # id вопроса → смысловая оценка (с весом)
+    cosines: dict = field(default_factory=dict)   # id вопроса → похожесть по смыслу (для запасного меню)
 
 
 class Retriever(Protocol):
-    def search(self, lemmas: Sequence[str], forced_scope: Optional[Category] = None) -> RetrievalResult: ...
+    def search(self, lemmas: Sequence[str], forced_scope: Optional[Category] = None,
+               query: Optional[str] = None) -> RetrievalResult: ...
 
 
 # ---------- Область поиска ----------
@@ -84,8 +119,9 @@ class ScopeResolver:
     """Определяет область поиска по ключевым словам разделов. Если уверенного лидера нет,
     область не определена и поиск идёт по всей базе."""
 
-    def __init__(self, kb: KnowledgeBase, config: AppConfig):
+    def __init__(self, kb: KnowledgeBase, config: AppConfig, fuzzy: Optional[FuzzyMatcher] = None):
         self._config = config
+        self._fuzzy = fuzzy
         self._categories = [
             c for c in kb.categories.values()
             if c.keywords and (config.scoring.category_scope or c.kind == "product")
@@ -96,7 +132,7 @@ class ScopeResolver:
             return ScopeResult(None, 0.0)
 
         prefix = self._config.scoring.prefix_min_length
-        scored = [(c, evaluate(c.keywords, lemmas, prefix)[0]) for c in self._categories]
+        scored = [(c, evaluate(c.keywords, lemmas, prefix, self._fuzzy)[0]) for c in self._categories]
         best_cat, best_score = min(scored, key=lambda x: (-x[1], -_depth(x[0].id), id_key(x[0].id)))
 
         t = self._config.thresholds
@@ -117,15 +153,29 @@ MAX_CANDIDATES = 5
 class KeywordRetriever:
     """Поиск по ключевым словам: область → оценка вопросов → топ-5."""
 
-    def __init__(self, kb: KnowledgeBase, config: AppConfig):
+    def __init__(self, kb: KnowledgeBase, config: AppConfig, fuzzy: Optional[FuzzyMatcher] = None,
+                 semantic: Optional[SemanticIndex] = None):
         self._kb = kb
         self._config = config
-        self._scope_resolver = ScopeResolver(kb, config)
+        self.semantic = semantic  # поиск по смыслу (None — выключен)
+        self._cosines: dict[str, float] = {}          # похожести текущего запроса
+        self._semantic_scores: dict[str, float] = {}  # и их перевод в оценки
+        # Учёт опечаток: если не передан явно, создаётся по config.json → fuzzy.
+        self.fuzzy = fuzzy if fuzzy is not None else make_fuzzy(config.fuzzy)
+        self._scope_resolver = ScopeResolver(kb, config, self.fuzzy)
 
-    def search(self, lemmas: Sequence[str], forced_scope: Optional[Category] = None) -> RetrievalResult:
+    def search(self, lemmas: Sequence[str], forced_scope: Optional[Category] = None,
+               query: Optional[str] = None) -> RetrievalResult:
+        """lemmas — основы слов запроса; query — исходный текст (нужен для поиска по смыслу)."""
         lemmas = tuple(lemmas)
         if not lemmas:
             return RetrievalResult(lemmas, None, 0.0, ())
+
+        self._cosines = {}
+        self._semantic_scores = {}
+        if self.semantic is not None and query:
+            self._cosines = self.semantic.similarities(query)
+            self._semantic_scores = self.semantic.scores(query)
 
         if forced_scope is not None:
             scope, scope_score = forced_scope, 1.0
@@ -136,22 +186,27 @@ class KeywordRetriever:
         if scope is not None:
             in_scope = self._rank(self._kb.questions_under(scope.id), lemmas, self._config.scoring.scope_boost)
             if in_scope or forced_scope is not None:
-                return RetrievalResult(lemmas, scope, scope_score, in_scope)
+                return RetrievalResult(lemmas, scope, scope_score, in_scope, dict(self._semantic_scores),
+                                       dict(self._cosines))
             # В области ничего не нашлось: ищем по всей базе.
 
         everywhere = self._rank(self._kb.questions, lemmas, 0.0)
-        return RetrievalResult(lemmas, None, scope_score if scope is None else 0.0, everywhere)
+        return RetrievalResult(lemmas, None, scope_score if scope is None else 0.0, everywhere,
+                               dict(self._semantic_scores), dict(self._cosines))
 
     def _rank(self, pool: Iterable[Question], lemmas: Sequence[str], boost: float) -> tuple[Candidate, ...]:
         prefix = self._config.scoring.prefix_min_length
+        semantic = self._semantic_scores
+        cosines = self._cosines
         scored = []
         for question in pool:
             if not question.is_active:
                 continue
-            score, matched = evaluate(question.keywords, lemmas, prefix)
+            keyword_score, matched = evaluate(question.keywords, lemmas, prefix, self.fuzzy)
+            score = combine_scores(keyword_score, semantic.get(question.id, 0.0), self._config.semantic.combine)
             if score <= 0:
                 continue
             final = min(1.0, score * (1 + boost)) if boost > 0 else score
-            scored.append((question, final, matched))
+            scored.append((question, final, matched, keyword_score))
         scored.sort(key=lambda x: (-x[1], -x[2], id_key(x[0].id)))
-        return tuple(Candidate(q, s) for q, s, _ in scored[:MAX_CANDIDATES])
+        return tuple(Candidate(q, s, k, cosines.get(q.id)) for q, s, _, k in scored[:MAX_CANDIDATES])

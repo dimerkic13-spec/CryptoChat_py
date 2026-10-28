@@ -100,7 +100,7 @@ class ChatEngineTests(unittest.TestCase):
 def real_engine():
     # Логика диалога проверяется на стеммере: он есть всегда и даёт одинаковый результат везде.
     # Морфология pymorphy3 проверяется отдельно (test_morphology.py).
-    return ChatEngine.create(CONTENT_DIR, "stemmer")
+    return ChatEngine.create(CONTENT_DIR, "stemmer", semantic=False)
 
 
 class GuidedFlowTests(unittest.TestCase):
