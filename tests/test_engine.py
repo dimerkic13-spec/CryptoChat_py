@@ -204,6 +204,38 @@ class GuidedFlowTests(unittest.TestCase):
         self.assertEqual([], given)
 
 
+class SuggestionAndNavigationTests(unittest.TestCase):
+    """Почти совпавшие вопросы предлагаются вместо меню тем; переходы по меню не ведут в поддержку."""
+
+    def test_near_miss_is_suggested_instead_of_topics(self):
+        reply = real_engine().ask("Я не могу найти номер лицензии")
+        self.assertIs(ReplyKind.CLARIFY, reply.kind)
+        self.assertIn("Возможно, вы имели в виду", reply.text)
+        self.assertEqual("1.3.1.2", reply.options[0].question.id)
+
+    def test_suggestions_can_be_turned_off(self):
+        engine = real_engine()
+        engine.config.dialog.suggest_score = 0
+        self.assertIs(ReplyKind.CLARIFY_BRANCH, engine.ask("Я не могу найти номер лицензии").kind)
+
+    def test_menu_navigation_never_escalates(self):
+        engine = real_engine()
+        for _ in range(4):
+            self.assertIs(ReplyKind.CLARIFY_BRANCH, engine.ask("абракадабра").kind)
+        # четыре неудачных вопроса подряд — счётчик на пределе, но человек идёт по меню сам
+        self.assertIs(ReplyKind.CLARIFY_BRANCH, engine.ask("1").kind)
+        leaf = engine.ask("1")
+        self.assertIs(ReplyKind.CLARIFY_BRANCH, leaf.kind)
+        self.assertTrue(all(o.question is not None for o in leaf.options))
+        self.assertIs(ReplyKind.ANSWER, engine.ask("1").kind)
+
+    def test_free_text_still_escalates_after_limit(self):
+        engine = real_engine()
+        for _ in range(4):
+            engine.ask("абракадабра")
+        self.assertIs(ReplyKind.ESCALATE, engine.ask("абракадабра").kind)
+
+
 class AcceptanceTests(unittest.TestCase):
     """Настоящие вопросы из content/acceptance.json и заголовки всех вопросов базы."""
 

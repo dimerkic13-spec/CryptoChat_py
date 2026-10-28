@@ -156,3 +156,29 @@ class RealPymorphyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DayMoneyCollisionTests(unittest.TestCase):
+    """С pymorphy3 «дней» → «день», а «день» — начало слова «деньги». Без группы синонимов
+    «средства/деньги» запрос про пробный период уходил в вопрос о возврате денег."""
+
+    def test_days_do_not_match_money(self):
+        from unittest import mock
+        from pathlib import Path
+        import cryptochat.engine as engine_module
+        import cryptochat.text as text
+        from cryptochat.engine import ChatEngine
+        forms = {"дней": "день", "дня": "день", "день": "день", "деньги": "деньги", "денег": "деньги",
+                 "средства": "средство", "средств": "средство", "работает": "работать", "работать": "работать"}
+
+        def lemmatize(word):
+            return forms.get(word, text.stem(word))
+        lemmatize.name = "имитация pymorphy3"
+        original = text.make_lemmatizer
+        with mock.patch.object(engine_module, "make_lemmatizer",
+                               lambda mode="stemmer": (lemmatize, None) if mode == "test" else original(mode)):
+            content = Path(__file__).resolve().parent.parent / "content"
+            engine = ChatEngine.create(content, morphology="test")
+            reply = engine.ask("сколько дней работает без лицензии")
+        first = reply.question.id if reply.question else reply.options[0].question.id
+        self.assertEqual("1.1.2.2", first)

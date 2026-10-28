@@ -28,7 +28,8 @@
     "escalateAfterSteps": 4,
     "maxBranchOptions": 7,
     "minScore": 0.05,
-    "feedback": true
+    "feedback": true,
+    "suggestScore": 0.15
   },
   "text": {
     "morphology": "auto"

@@ -230,6 +230,9 @@ class DialogConfig:
     max_branch_options: int = 7
     # Минимальная оценка вопроса для списка «Похожие вопросы» после ответа.
     min_score: float = 0.05
+    # Если подходящих вопросов нет, вопросы с оценкой по ключам не ниже этой предлагаются
+    # как «Возможно, вы имели в виду…» вместо меню тем (0 — не предлагать).
+    suggest_score: float = 0.15
     # Спрашивать после ответа, помог ли он.
     feedback: bool = True
 
@@ -312,6 +315,8 @@ class AppConfig:
             raise ContentError(f"{source}: dialog.escalateAfterSteps должно быть не меньше 1.")
         if self.dialog.max_branch_options < 2:
             raise ContentError(f"{source}: dialog.maxBranchOptions должно быть не меньше 2.")
+        if not 0 <= self.dialog.suggest_score <= 1:
+            raise ContentError(f"{source}: dialog.suggestScore должно быть от 0 до 1.")
         if not 0 <= self.dialog.min_score <= 1:
             raise ContentError(f"{source}: dialog.minScore должно быть от 0 до 1.")
         if self.text.morphology.lower() not in ("stemmer", "pymorphy3", "auto"):
