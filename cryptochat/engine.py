@@ -163,12 +163,17 @@ class ChatEngine:
     # ---------- Ответ на вопрос ----------
 
     def _choose(self, pending: PendingChoice, option: ChatOption) -> ChatReply:
+        # Выбор продукта или ветки — это навигация по меню, а не неудачная попытка:
+        # такие шаги не приближают перевод в поддержку.
         if option.product is not None:
             return self._respond(self._retriever.search(pending.lemmas, option.product, query=pending.query),
-                                 option.product, pending.query)
+                                 option.product, pending.query, from_menu=True)
+        if option.browse:
+            result = self._retriever.search(pending.lemmas, option.branch, query=pending.query)
+            return self._branch_reply(option.branch, result, pending.query, None, browse=True)
         if option.branch is not None:
             return self._respond(self._retriever.search(pending.lemmas, option.branch, query=pending.query),
-                                 option.branch, pending.query)
+                                 option.branch, pending.query, from_menu=True)
 
         reply = self._answer_reply(option.question, option.score, None)
         if not self._guided:
@@ -177,7 +182,8 @@ class ChatEngine:
                   if o.question is not None and o.number != option.number]
         return self._with_feedback(reply, others, pending.lemmas, pending.query)
 
-    def _respond(self, result: RetrievalResult, node: Optional[Category], query: Optional[str]) -> ChatReply:
+    def _respond(self, result: RetrievalResult, node: Optional[Category], query: Optional[str],
+                 from_menu: bool = False) -> ChatReply:
         decision = self._policy.decide(result)
         debug = self._build_debug(result) if self.debug_enabled else None
         kind = decision.kind
@@ -207,21 +213,25 @@ class ChatEngine:
             return ChatReply(ReplyKind.CLARIFY_PRODUCT, "\n".join(lines), options, debug)
 
         # Clarify или ClarifyBranch. В управляемом диалоге бот уточняет несколько раз,
-        # и только потом направляет в поддержку.
-        if self._guided:
+        # и только потом направляет в поддержку. Переходы по меню тем (from_menu) не считаются.
+        if self._guided and not from_menu:
             if self._session.steps >= self.config.dialog.escalate_after_steps:
                 self._session.reset_all()
                 return self._escalate_reply(result.scope or node, debug)
             self._session.next_step()
 
         if kind is DecisionKind.CLARIFY_BRANCH:
-            fallback = self._semantic_menu(node or result.scope, result, query, debug)
-            if fallback is not None:
-                return fallback
+            # Свободный вопрос без явного совпадения: сначала предложить близкие варианты,
+            # и только если их нет — меню тем. При переходе по меню тем показываем ветку целиком.
+            if node is None and not from_menu:
+                fallback = self._suggestion_menu(result, query, debug)
+                if fallback is not None:
+                    return fallback
             return self._branch_reply(node or result.scope, result, query, debug)
 
         options = tuple(ChatOption(i + 1, c.question.title, c.score, question=c.question)
                         for i, c in enumerate(decision.candidates))
+        options += self._browse_options(options)
         self._session.wait(PendingChoice(ReplyKind.CLARIFY, options, result.lemmas, None, query))
 
         if len(options) == 1:
@@ -230,43 +240,78 @@ class ChatEngine:
                      "  0. Нет / связаться с поддержкой"]
         else:
             lines = ["Уточните, что вы имеете в виду?"]
-            lines += [f"  {o.number}. {o.label}  (score: {fmt(o.score)})" for o in options]
+            lines += [f"  {o.number}. {o.label}" + ("" if o.browse else f"  (score: {fmt(o.score)})") for o in options]
             lines.append("  0. Другое / связаться с поддержкой")
         lines.append("Введите номер:")
         return ChatReply(ReplyKind.CLARIFY, "\n".join(lines), options, debug)
 
     # ---------- Запасное меню по смыслу ----------
 
-    def _semantic_menu(self, node: Optional[Category], result: RetrievalResult,
-                       query: Optional[str], debug: Optional[str]) -> Optional[ChatReply]:
-        """Ключи ничего не нашли: показать самые похожие по смыслу вопросы вместо меню тем.
-        Возвращает None, если поиск по смыслу выключен или ни один вопрос не выделяется."""
-        cfg = self.config.semantic
-        if self.semantic is None or not cfg.menu_fallback or not result.cosines or not result.lemmas:
+    def _suggestion_menu(self, result: RetrievalResult, query: Optional[str],
+                         debug: Optional[str]) -> Optional[ChatReply]:
+        """Явного совпадения нет: показать близкие варианты вместо меню тем.
+
+        Сначала — вопросы, которые по ключам почти дотянули до порога (оценка не ниже
+        dialog.suggestScore), затем — самые похожие по смыслу (если поиск по смыслу включён).
+        Возвращает None, если предложить нечего."""
+        if not result.lemmas:
             return None
         kb = self.knowledge_base
-        pool = {q.id: q for q in (kb.questions if node is None else kb.questions_under(node.id)) if q.is_active}
-        cosines = {qid: c for qid, c in result.cosines.items() if qid in pool}
-        if not cosines:
+        pool = {q.id: q for q in kb.questions if q.is_active}
+        size = self.config.menu.max_options
+        chosen: list[tuple[str, float]] = []
+
+        # 1) почти совпавшие по ключам
+        threshold = self.config.dialog.suggest_score
+        for c in result.candidates:
+            if threshold > 0 and c.score >= threshold and c.question.id in pool:
+                chosen.append((c.question.id, c.score))
+
+        # 2) похожие по смыслу
+        cfg = self.config.semantic
+        if self.semantic is not None and cfg.menu_fallback and result.cosines:
+            cosines = {qid: c for qid, c in result.cosines.items() if qid in pool}
+            if cosines:
+                z = SemanticIndex.z_scores(cosines)
+                for qid in sorted(cosines, key=cosines.get, reverse=True)[:cfg.menu_size]:
+                    if z[qid] >= cfg.menu_z and all(qid != q for q, _ in chosen):
+                        chosen.append((qid, cosines[qid]))
+
+        chosen = chosen[:size]
+        if not chosen:
             return None
-        z = SemanticIndex.z_scores(cosines)
-        top = [qid for qid in sorted(cosines, key=cosines.get, reverse=True)[:cfg.menu_size] if z[qid] >= cfg.menu_z]
-        if not top:
-            return None
-        options = tuple(ChatOption(i + 1, pool[qid].title, cosines[qid], question=pool[qid])
-                        for i, qid in enumerate(top))
+        options = tuple(ChatOption(i + 1, pool[qid].title, score, question=pool[qid])
+                        for i, (qid, score) in enumerate(chosen))
+        options += self._browse_options(options)
         self._session.wait(PendingChoice(ReplyKind.CLARIFY, options, result.lemmas, None, query))
         lines = ["Точного совпадения не нашёл. Возможно, вы имели в виду:"]
         lines += [f"  {o.number}. {o.label}" for o in options]
         lines += ["  0. Ничего не подходит — обратиться в техподдержку", "Введите номер:"]
         return ChatReply(ReplyKind.CLARIFY, "\n".join(lines), options, debug)
 
+    def _browse_options(self, options: tuple[ChatOption, ...]) -> tuple[ChatOption, ...]:
+        """Пункты под меню вопросов (dialog.browseOptions): все вопросы раздела первого варианта
+        и список тем. Нужный вопрос найдётся по списку, даже если меню его не угадало."""
+        if not self._guided or not self.config.dialog.browse_options or not options:
+            return ()
+        kb = self.knowledge_base
+        extra: list[ChatOption] = []
+        first = options[0].question
+        block = kb.categories.get(first.category_id) if first else None
+        shown = {o.question.id for o in options if o.question}
+        if block is not None and any(q.is_active and q.id not in shown for q in kb.questions_under(block.id)):
+            extra.append(ChatOption(len(options) + 1, f"Другие вопросы раздела «{block.name}»", 0.0,
+                                    branch=block, browse=True))
+        extra.append(ChatOption(len(options) + len(extra) + 1, "Другая тема — выбрать из списка тем", 0.0, browse=True))
+        return tuple(extra)
+
     # ---------- Уточнение по веткам дерева ----------
 
     def _branch_reply(self, node: Optional[Category], result: RetrievalResult,
-                      query: Optional[str], debug: Optional[str]) -> ChatReply:
+                      query: Optional[str], debug: Optional[str], browse: bool = False) -> ChatReply:
         """Предлагает выбрать тему (или блок), а на последнем уровне — конкретный вопрос.
-        Ветки с единственным вложенным разделом пропускаются."""
+        Ветки с единственным вложенным разделом пропускаются. browse — переход «по списку»:
+        выбор ветки сразу открывает её содержимое, без нового поиска."""
         lemmas = result.lemmas
         prefix = self.config.scoring.prefix_min_length
         max_options = self.config.dialog.max_branch_options
@@ -293,7 +338,8 @@ class ChatEngine:
 
         ranked_branches = sorted(((c, self._branch_score(c, lemmas, result.semantic)) for c in children),
                                  key=lambda x: (-x[1], id_key(x[0].id)))[:max_options]
-        options = tuple(ChatOption(i + 1, c.name, s, branch=c) for i, (c, s) in enumerate(ranked_branches))
+        options = tuple(ChatOption(i + 1, c.name, s, branch=c, browse=browse)
+                        for i, (c, s) in enumerate(ranked_branches))
         self._session.wait(PendingChoice(ReplyKind.CLARIFY_BRANCH, options, lemmas, None, query))
         lines = ["Уточните, к какой теме относится ваш вопрос:" if node is None
                  else f"Уточните, к какой теме относится ваш вопрос ({node.name}):"]
