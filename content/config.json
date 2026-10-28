@@ -1,0 +1,56 @@
+{
+  "thresholds": {
+    "answer": 0.6,
+    "clarify": 0.3,
+    "scopeMin": 0.1,
+    "scopeMargin": 0.05,
+    "dominanceGap": 0.2
+  },
+  "scoring": {
+    "scopeBoost": 0.25,
+    "prefixMinLength": 4,
+    "categoryScope": false
+  },
+  "menu": {
+    "maxOptions": 3
+  },
+  "support": {
+    "url": "support.cryptopro.ru"
+  },
+  "logging": {
+    "unanswered": false,
+    "path": "logs/unanswered.jsonl",
+    "feedback": true,
+    "feedbackPath": "logs/feedback.jsonl"
+  },
+  "dialog": {
+    "guided": true,
+    "escalateAfterSteps": 4,
+    "maxBranchOptions": 7,
+    "minScore": 0.05,
+    "feedback": true
+  },
+  "text": {
+    "morphology": "auto"
+  },
+  "sessions": {
+    "enabled": true,
+    "path": "logs/sessions"
+  },
+  "email": {
+    "enabled": false,
+    "smtpHost": "smtp.yandex.ru",
+    "smtpPort": 465,
+    "security": "ssl",
+    "username": "bot@example.ru",
+    "from": "bot@example.ru",
+    "to": [
+      "you@example.ru"
+    ],
+    "subjectPrefix": "CryptoChat",
+    "passwordEnv": "CRYPTOCHAT_SMTP_PASSWORD",
+    "sendEmpty": false,
+    "sendPendingOnStart": true,
+    "timeoutSeconds": 20
+  }
+}

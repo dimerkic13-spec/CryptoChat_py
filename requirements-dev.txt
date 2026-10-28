@@ -1,0 +1,3 @@
+# Для сборки CryptoChat.exe.
+-r requirements.txt
+pyinstaller>=6.0

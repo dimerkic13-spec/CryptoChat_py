@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+publish/
+logs/
+*.spec
+*.zip
+.vscode/
+.idea/
+
+# Пароль почты — никогда не в Git
+secrets.json
