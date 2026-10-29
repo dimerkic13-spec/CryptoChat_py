@@ -1,4 +1,4 @@
-"""Качество на content/synthetic.json (1900 запросов, по 50 на вопрос). Пороги — чуть ниже достигнутого в 0.2.6a:
+"""Качество на content/synthetic.json (2280 запросов, по 60 на вопрос). Пороги — чуть ниже достигнутого:
 если тест упал после правки базы, посмотрите таблицу по вопросам (ключ --synthetic) и верните качество."""
 import unittest
 
@@ -26,12 +26,12 @@ def has_pymorphy3() -> bool:
 
 
 class SyntheticQualityTests(unittest.TestCase):
-    def test_file_has_50_queries_for_every_question(self):
+    def test_file_has_60_queries_for_every_question(self):
         cases = load_synthetic(CONTENT_DIR)
         ids = [q.id for q in ChatEngine.create(CONTENT_DIR, "stemmer", semantic=False).knowledge_base.questions]
         self.assertEqual(sorted(ids), sorted(cases))
         for queries in cases.values():
-            self.assertEqual(50, len(set(queries)))
+            self.assertEqual(60, len(set(queries)))
 
     def check(self, morphology: str, minimum: float):
         share, wrong, total = measure(morphology)
