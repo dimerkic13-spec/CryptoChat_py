@@ -150,7 +150,7 @@ class ConversationTests(unittest.TestCase):
             engine.config.email.enabled = False
 
             conversation = Conversation(engine)
-            for line in ("забыл логин и пароль от кабинета", "да", "абракадабра", "выход"):
+            for line in ("Можно оплатить счёт на ИП банковской картой?", "да", "абракадабра", "выход"):
                 conversation.user(line)
                 conversation.bot(line, engine.ask(line))
             conversation.close()

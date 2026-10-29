@@ -168,6 +168,9 @@ class ChatEngine:
         if option.product is not None:
             return self._respond(self._retriever.search(pending.lemmas, option.product, query=pending.query),
                                  option.product, pending.query, from_menu=True)
+        if option.browse:
+            result = self._retriever.search(pending.lemmas, option.branch, query=pending.query)
+            return self._branch_reply(option.branch, result, pending.query, None, browse=True)
         if option.branch is not None:
             return self._respond(self._retriever.search(pending.lemmas, option.branch, query=pending.query),
                                  option.branch, pending.query, from_menu=True)
@@ -228,6 +231,7 @@ class ChatEngine:
 
         options = tuple(ChatOption(i + 1, c.question.title, c.score, question=c.question)
                         for i, c in enumerate(decision.candidates))
+        options += self._browse_options(options)
         self._session.wait(PendingChoice(ReplyKind.CLARIFY, options, result.lemmas, None, query))
 
         if len(options) == 1:
@@ -236,7 +240,7 @@ class ChatEngine:
                      "  0. Нет / связаться с поддержкой"]
         else:
             lines = ["Уточните, что вы имеете в виду?"]
-            lines += [f"  {o.number}. {o.label}  (score: {fmt(o.score)})" for o in options]
+            lines += [f"  {o.number}. {o.label}" + ("" if o.browse else f"  (score: {fmt(o.score)})") for o in options]
             lines.append("  0. Другое / связаться с поддержкой")
         lines.append("Введите номер:")
         return ChatReply(ReplyKind.CLARIFY, "\n".join(lines), options, debug)
@@ -278,18 +282,36 @@ class ChatEngine:
             return None
         options = tuple(ChatOption(i + 1, pool[qid].title, score, question=pool[qid])
                         for i, (qid, score) in enumerate(chosen))
+        options += self._browse_options(options)
         self._session.wait(PendingChoice(ReplyKind.CLARIFY, options, result.lemmas, None, query))
         lines = ["Точного совпадения не нашёл. Возможно, вы имели в виду:"]
         lines += [f"  {o.number}. {o.label}" for o in options]
         lines += ["  0. Ничего не подходит — обратиться в техподдержку", "Введите номер:"]
         return ChatReply(ReplyKind.CLARIFY, "\n".join(lines), options, debug)
 
+    def _browse_options(self, options: tuple[ChatOption, ...]) -> tuple[ChatOption, ...]:
+        """Пункты под меню вопросов (dialog.browseOptions): все вопросы раздела первого варианта
+        и список тем. Нужный вопрос найдётся по списку, даже если меню его не угадало."""
+        if not self._guided or not self.config.dialog.browse_options or not options:
+            return ()
+        kb = self.knowledge_base
+        extra: list[ChatOption] = []
+        first = options[0].question
+        block = kb.categories.get(first.category_id) if first else None
+        shown = {o.question.id for o in options if o.question}
+        if block is not None and any(q.is_active and q.id not in shown for q in kb.questions_under(block.id)):
+            extra.append(ChatOption(len(options) + 1, f"Другие вопросы раздела «{block.name}»", 0.0,
+                                    branch=block, browse=True))
+        extra.append(ChatOption(len(options) + len(extra) + 1, "Другая тема — выбрать из списка тем", 0.0, browse=True))
+        return tuple(extra)
+
     # ---------- Уточнение по веткам дерева ----------
 
     def _branch_reply(self, node: Optional[Category], result: RetrievalResult,
-                      query: Optional[str], debug: Optional[str]) -> ChatReply:
+                      query: Optional[str], debug: Optional[str], browse: bool = False) -> ChatReply:
         """Предлагает выбрать тему (или блок), а на последнем уровне — конкретный вопрос.
-        Ветки с единственным вложенным разделом пропускаются."""
+        Ветки с единственным вложенным разделом пропускаются. browse — переход «по списку»:
+        выбор ветки сразу открывает её содержимое, без нового поиска."""
         lemmas = result.lemmas
         prefix = self.config.scoring.prefix_min_length
         max_options = self.config.dialog.max_branch_options
@@ -316,7 +338,8 @@ class ChatEngine:
 
         ranked_branches = sorted(((c, self._branch_score(c, lemmas, result.semantic)) for c in children),
                                  key=lambda x: (-x[1], id_key(x[0].id)))[:max_options]
-        options = tuple(ChatOption(i + 1, c.name, s, branch=c) for i, (c, s) in enumerate(ranked_branches))
+        options = tuple(ChatOption(i + 1, c.name, s, branch=c, browse=browse)
+                        for i, (c, s) in enumerate(ranked_branches))
         self._session.wait(PendingChoice(ReplyKind.CLARIFY_BRANCH, options, lemmas, None, query))
         lines = ["Уточните, к какой теме относится ваш вопрос:" if node is None
                  else f"Уточните, к какой теме относится ваш вопрос ({node.name}):"]
