@@ -110,7 +110,7 @@ class GuidedFlowTests(unittest.TestCase):
         config = AppConfig.load(CONTENT_DIR)
         self.assertTrue(config.dialog.guided)
         self.assertEqual(4, config.dialog.escalate_after_steps)
-        self.assertAlmostEqual(0.6, config.thresholds.answer)
+        self.assertAlmostEqual(0.65, config.thresholds.answer)
         self.assertAlmostEqual(0.3, config.thresholds.clarify)
         self.assertEqual("auto", config.text.morphology)
 
@@ -154,12 +154,13 @@ class GuidedFlowTests(unittest.TestCase):
         self.assertIs(ReplyKind.CLARIFY_BRANCH, e.ask("абракадабра").kind)
 
     def test_confident_answer_has_similar_questions_feedback_and_support(self):
-        reply = real_engine().ask("забыл логин и пароль от кабинета")
+        # С 0.2.7b порог ответа 0.65: «забыл логин и пароль от кабинета» (0.6x) теперь уточняется меню.
+        reply = real_engine().ask("Можно оплатить счёт на ИП банковской картой?")
         self.assertIs(ReplyKind.ANSWER, reply.kind)
-        self.assertEqual("1.3.3.2", reply.question.id)
+        self.assertEqual("1.2.2.4", reply.question.id)
         self.assertIn("Ответ помог?", reply.text)
         self.assertIn("0. Обратиться в техподдержку", reply.text)
-        self.assertEqual("1.3.2.1", reply.options[0].question.id)
+        self.assertEqual("1.2.1.1", reply.options[0].question.id)
 
     def test_fitting_questions_then_answer_then_positive_feedback(self):
         e = real_engine()
@@ -186,16 +187,16 @@ class GuidedFlowTests(unittest.TestCase):
         given = []
         e.feedback_listeners.append(given.append)
 
-        e.ask("забыл логин и пароль от кабинета")
+        e.ask("Можно оплатить счёт на ИП банковской картой?")
         reply = e.ask("нет")
         self.assertIs(ReplyKind.FEEDBACK, reply.kind)
         self.assertIn("0. Обратиться в техподдержку", reply.text)
-        self.assertEqual(1, len(reply.options))
+        self.assertEqual(3, len(reply.options))
         self.assertFalse(given[0].helpful)
 
         nxt = e.ask("1")
         self.assertIs(ReplyKind.ANSWER, nxt.kind)
-        self.assertEqual("1.3.2.1", nxt.question.id)
+        self.assertEqual("1.2.1.1", nxt.question.id)
 
     def test_yes_without_answer_is_ordinary_question(self):
         e = real_engine()

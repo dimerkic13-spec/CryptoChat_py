@@ -36,7 +36,7 @@ class SyntheticQualityTests(unittest.TestCase):
     def check(self, morphology: str, minimum: float):
         share, wrong, total = measure(morphology)
         self.assertGreaterEqual(share, minimum, f"верный вопрос первым: {share:.1%} из {total}")
-        self.assertLessEqual(wrong, 1, f"неверных прямых ответов: {wrong}")
+        self.assertEqual(0, wrong, f"неверных прямых ответов: {wrong}")  # 0.2.7b, порог 0.65: 0
 
     def test_stemmer_right_question_comes_first(self):
         self.check("stemmer", 0.85)  # 0.2.5a: 0.756, 0.2.6a: 0.843, 0.2.7a: 0.865
@@ -51,14 +51,14 @@ class SyntheticQualityTests(unittest.TestCase):
         within3 = sum(1 for r in results if r[2] == "answer" and r[3] <= 3) / len(results)
         wrong = sum(1 for r in results if r[2] == "wrong")
         self.assertGreaterEqual(within3, minimum, f"верный ответ за ≤3 уточнения: {within3:.1%}")
-        self.assertLessEqual(wrong, 1, f"неверных ответов: {wrong}")
+        self.assertEqual(0, wrong, f"неверных ответов: {wrong}")
 
     def test_stemmer_dialog_reaches_answer_within_3_steps(self):
-        self.check_dialogs("stemmer", 0.96)  # 0.2.6a: 0.931, 0.2.7a: 0.974
+        self.check_dialogs("stemmer", 0.96)  # 0.2.6a: 0.931, 0.2.7a: 0.974, 0.2.7b: 0.975
 
     @unittest.skipUnless(has_pymorphy3(), "pymorphy3 не установлен")
     def test_pymorphy3_dialog_reaches_answer_within_3_steps(self):
-        self.check_dialogs("pymorphy3", 0.97)  # 0.2.6a: 0.932, 0.2.7a: 0.979
+        self.check_dialogs("pymorphy3", 0.97)  # 0.2.6a: 0.932, 0.2.7a: 0.979, 0.2.7b: 0.980
 
 
 if __name__ == "__main__":

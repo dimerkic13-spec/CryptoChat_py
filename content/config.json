@@ -1,6 +1,6 @@
 {
   "thresholds": {
-    "answer": 0.6,
+    "answer": 0.65,
     "clarify": 0.3,
     "scopeMin": 0.1,
     "scopeMargin": 0.05,

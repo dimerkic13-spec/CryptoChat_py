@@ -155,7 +155,7 @@ class RealContentSemanticTests(unittest.TestCase):
             semantic_module.SentenceTransformerEncoder = original
         self.assertIsNone(engine.semantic)
         self.assertEqual("нет библиотеки", engine.semantic_note)
-        self.assertIs(ReplyKind.ANSWER, engine.ask("забыл логин и пароль от кабинета").kind)
+        self.assertIs(ReplyKind.ANSWER, engine.ask("Можно оплатить счёт на ИП банковской картой?").kind)
 
     def test_compare_semantic_runs_with_fake_model(self):
         original = semantic_module.SentenceTransformerEncoder
