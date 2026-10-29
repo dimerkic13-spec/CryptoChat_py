@@ -1,4 +1,4 @@
-"""Качество на content/synthetic.json (1900 запросов, по 50 на вопрос). Пороги — чуть ниже достигнутого в 0.2.6a:
+"""Качество на content/synthetic.json (2280 запросов, по 60 на вопрос). Пороги — чуть ниже достигнутого:
 если тест упал после правки базы, посмотрите таблицу по вопросам (ключ --synthetic) и верните качество."""
 import unittest
 
@@ -26,17 +26,17 @@ def has_pymorphy3() -> bool:
 
 
 class SyntheticQualityTests(unittest.TestCase):
-    def test_file_has_50_queries_for_every_question(self):
+    def test_file_has_60_queries_for_every_question(self):
         cases = load_synthetic(CONTENT_DIR)
         ids = [q.id for q in ChatEngine.create(CONTENT_DIR, "stemmer", semantic=False).knowledge_base.questions]
         self.assertEqual(sorted(ids), sorted(cases))
         for queries in cases.values():
-            self.assertEqual(50, len(set(queries)))
+            self.assertEqual(60, len(set(queries)))
 
     def check(self, morphology: str, minimum: float):
         share, wrong, total = measure(morphology)
         self.assertGreaterEqual(share, minimum, f"верный вопрос первым: {share:.1%} из {total}")
-        self.assertLessEqual(wrong, 1, f"неверных прямых ответов: {wrong}")
+        self.assertEqual(0, wrong, f"неверных прямых ответов: {wrong}")  # 0.2.7b, порог 0.65: 0
 
     def test_stemmer_right_question_comes_first(self):
         self.check("stemmer", 0.85)  # 0.2.5a: 0.756, 0.2.6a: 0.843, 0.2.7a: 0.865
@@ -51,14 +51,14 @@ class SyntheticQualityTests(unittest.TestCase):
         within3 = sum(1 for r in results if r[2] == "answer" and r[3] <= 3) / len(results)
         wrong = sum(1 for r in results if r[2] == "wrong")
         self.assertGreaterEqual(within3, minimum, f"верный ответ за ≤3 уточнения: {within3:.1%}")
-        self.assertLessEqual(wrong, 1, f"неверных ответов: {wrong}")
+        self.assertEqual(0, wrong, f"неверных ответов: {wrong}")
 
     def test_stemmer_dialog_reaches_answer_within_3_steps(self):
-        self.check_dialogs("stemmer", 0.96)  # 0.2.6a: 0.931, 0.2.7a: 0.974
+        self.check_dialogs("stemmer", 0.96)  # 0.2.6a: 0.931, 0.2.7a: 0.974, 0.2.7b: 0.975
 
     @unittest.skipUnless(has_pymorphy3(), "pymorphy3 не установлен")
     def test_pymorphy3_dialog_reaches_answer_within_3_steps(self):
-        self.check_dialogs("pymorphy3", 0.97)  # 0.2.6a: 0.932, 0.2.7a: 0.979
+        self.check_dialogs("pymorphy3", 0.97)  # 0.2.6a: 0.932, 0.2.7a: 0.979, 0.2.7b: 0.980
 
 
 if __name__ == "__main__":
